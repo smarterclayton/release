@@ -1,0 +1,43 @@
+#!/bin/bash
+
+# USAGE: BEFORE=1w MAX=10 VERSION=4.5 hack/refresh | sort -u | PROW_BUILD=1 xargs -L1 hack/build
+
+set -euo pipefail
+
+base=$( dirname "${BASH_SOURCE[0]}")
+
+max="${MAX:-10}"
+before="${BEFORE:-1w}"
+version="${VERSION:-4.5}"
+branch="${BRANCH:-release-${version}}"
+oldest=$( date -v -${before} -u '+%Y-%m-%dT%H:%M:%SZ' )
+count=0
+while IFS= read -r line; do
+  tag=$( echo "${line}" | cut -f 1 -d ' ' )
+  date=$( echo "${line}" | cut -f 2 -d ' ' )
+  if [[ "${date}" > "${oldest}" || "${count}" -ge "${max}" ]]; then
+    break
+  fi
+  source=$( oc get istag -n ocp "${version}:${tag}" -o "jsonpath={.image.dockerImageMetadata.Config.Labels.io\.openshift\.build\.source-location}" )
+  if [[ -z "${source}" ]]; then
+    continue
+  fi
+  match="^(git@|https://)github.com/(.*)(\.git)?$"
+  if ! [[ $source =~ $match ]]; then
+    echo "warning: tag '$tag' does not have a git repository" 1>&2
+    continue
+  fi
+  target=${branch}
+  repo=${BASH_REMATCH[2]}
+  path="${base}/../ci-operator/config/${repo}/${repo//\//-}-${target}.yaml"
+  if ! [[ -f "${path}" ]]; then
+    path="${base}/../ci-operator/config/${repo}/${repo//\//-}-openshift-${version}.yaml"
+    if ! [[ -f "${path}" ]]; then
+      echo "warning: tag '$tag' does not have a ci-operator configuration for branch $target in $repo" 1>&2
+      continue
+    fi
+    target=openshift-${version}
+  fi
+  count=$((count+1))
+  echo "${repo}/${target}"
+done < <( oc get is -n ocp ${version} -o 'jsonpath={range .status.tags[*]}{.tag} {.items[0].created}{"\n"}{end}' | sort -k 2 )
